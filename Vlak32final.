@@ -1,0 +1,226 @@
+// ==========================================
+// ESP32 + TVŮJ MALÝ H-MŮSTEK Z FOTKY
+// (MX1508 / L9110S podobný modul)
+// ==========================================
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+// ==========================================
+// Piny H-Můstku z tvé desky
+// ==========================================
+// A-1A, A-1B = motor A
+// B-1A, B-1B = motor B
+
+const int A1 = 27;   // A-1A
+const int A2 = 26;   // A-1B
+
+const int B1 = 33;   // B-1A
+const int B2 = 25;   // B-1B
+
+// ==========================================
+// LED světla
+// ==========================================
+const int LED1_PIN = 12;
+const int LED2_PIN = 13;
+
+WebServer server(80);
+
+// ==========================================
+// WiFi AP
+// ==========================================
+const char* jmenoWifi = "Vlak_Ovladani";
+const char* hesloWifi = "12345678";
+
+// ==========================================
+// Rychlost
+// ==========================================
+int targetSpeed = 0;
+float currentSpeed = 0;
+unsigned long lastRampTime = 0;
+
+// ==========================================
+// HTML stránka
+// ==========================================
+const char html_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vlak</title>
+<style>
+body{
+font-family:Arial;
+background:#111827;
+color:white;
+text-align:center;
+padding:20px;
+}
+input{
+width:90%;
+height:50px;
+}
+button{
+width:90%;
+padding:15px;
+font-size:22px;
+margin:10px;
+border:none;
+border-radius:10px;
+}
+.stop{background:red;color:white;}
+.light{background:orange;}
+</style>
+</head>
+<body>
+
+<h1>🚂 Ovládání Vlaku</h1>
+
+<h2 id="txt">0%</h2>
+
+<input type="range" min="-100" max="100" value="0" id="slider">
+
+<button class="stop" onclick="stopTrain()">STOP</button>
+<button class="light" onclick="lights()">SVĚTLA</button>
+
+<script>
+let s=document.getElementById("slider");
+let txt=document.getElementById("txt");
+let lightState=0;
+
+s.oninput=function(){
+txt.innerHTML=this.value+"%";
+fetch("/speed?v="+this.value);
+}
+
+function stopTrain(){
+s.value=0;
+txt.innerHTML="0%";
+fetch("/speed?v=0");
+}
+
+function lights(){
+lightState=!lightState;
+fetch("/led?state="+(lightState?1:0));
+}
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// ==========================================
+// WEB
+// ==========================================
+void handleRoot() {
+  server.send(200, "text/html", html_page);
+}
+
+void handleSpeed() {
+  if (server.hasArg("v")) {
+    int percentage = server.arg("v").toInt();
+
+    if (percentage > 100) percentage = 100;
+    if (percentage < -100) percentage = -100;
+
+    targetSpeed = map(percentage, -100, 100, -255, 255);
+
+    server.send(200, "text/plain", "OK");
+  }
+}
+
+void handleLed() {
+  if (server.hasArg("state")) {
+    int state = server.arg("state").toInt();
+
+    digitalWrite(LED1_PIN, state);
+    digitalWrite(LED2_PIN, state);
+
+    server.send(200, "text/plain", "OK");
+  }
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(A1, OUTPUT);
+  pinMode(A2, OUTPUT);
+  pinMode(B1, OUTPUT);
+  pinMode(B2, OUTPUT);
+
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+
+  WiFi.softAP(jmenoWifi, hesloWifi);
+
+  Serial.println("WiFi hotovo");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", handleRoot);
+  server.on("/speed", handleSpeed);
+  server.on("/led", handleLed);
+
+  server.begin();
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  server.handleClient();
+
+  if (millis() - lastRampTime > 5) {
+
+    if (currentSpeed < targetSpeed) {
+      currentSpeed += 2;
+      if (currentSpeed > targetSpeed) currentSpeed = targetSpeed;
+    }
+
+    if (currentSpeed > targetSpeed) {
+      currentSpeed -= 2;
+      if (currentSpeed < targetSpeed) currentSpeed = targetSpeed;
+    }
+
+    applyMotorSpeed((int)currentSpeed);
+
+    lastRampTime = millis();
+  }
+}
+
+// ==========================================
+// MOTOR CONTROL
+// ==========================================
+void applyMotorSpeed(int speedPwm) {
+
+  int pwm = abs(speedPwm);
+
+  if (speedPwm > 0) {
+    // VPŘED
+    analogWrite(A1, pwm);
+    digitalWrite(A2, LOW);
+
+    analogWrite(B1, pwm);
+    digitalWrite(B2, LOW);
+  }
+
+  else if (speedPwm < 0) {
+    // VZAD
+    digitalWrite(A1, LOW);
+    analogWrite(A2, pwm);
+
+    digitalWrite(B1, LOW);
+    analogWrite(B2, pwm);
+  }
+
+  else {
+    // STOP
+    digitalWrite(A1, LOW);
+    digitalWrite(A2, LOW);
+    digitalWrite(B1, LOW);
+    digitalWrite(B2, LOW);
+  }
+}
