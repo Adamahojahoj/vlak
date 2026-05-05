@@ -1,0 +1,172 @@
+#include <WiFi.h>
+#include <WebServer.h>
+ 
+// ==========================================
+// Piny podle TVÉHO zapojení L9110S
+// ==========================================
+const int MOTOR_A1 = 25;  // A-1A
+const int MOTOR_A2 = 26;  // A-1B
+ 
+const int MOTOR_B1 = 27;  // B-1A
+const int MOTOR_B2 = 14;  // B-1B
+ 
+// ==========================================
+// LED světla
+// ==========================================
+const int LED1_PIN = 12;
+const int LED2_PIN = 13;
+ 
+WebServer server(80);
+ 
+// ==========================================
+// WiFi AP
+// ==========================================
+const char* jmenoWifi = "Vlak_Ovladani";
+const char* hesloWifi = "12345678";
+ 
+// ==========================================
+// Rychlost
+// ==========================================
+int targetSpeed = 0;
+float currentSpeed = 0;
+unsigned long lastRampTime = 0;
+ 
+// ==========================================
+// HTML stránka
+// ==========================================
+const char html_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vlak</title>
+</head>
+<body>
+<h1>🚂 Ovládání Vlaku</h1>
+<h2 id="txt">0%</h2>
+<input type="range" min="-100" max="100" value="0" id="slider" style="width: 80%; height: 50px;">
+<br><br>
+<button onclick="stopTrain()" style="padding: 20px;">STOP</button>
+<button onclick="lights()" style="padding: 20px;">SVĚTLA</button>
+<script>
+let s=document.getElementById("slider");
+let txt=document.getElementById("txt");
+let lightState=0;
+ 
+s.oninput=function(){
+  txt.innerHTML=this.value+"%";
+  fetch("/speed?v="+this.value);
+}
+ 
+function stopTrain(){
+  s.value=0;
+  txt.innerHTML="0%";
+  fetch("/speed?v=0");
+}
+ 
+function lights(){
+  lightState=!lightState;
+  fetch("/led?state="+(lightState?1:0));
+}
+</script>
+</body>
+</html>
+)rawliteral";
+ 
+// ==========================================
+// WEB
+// ==========================================
+void handleRoot() {
+  server.send(200, "text/html", html_page);
+}
+ 
+void handleSpeed() {
+  if (server.hasArg("v")) {
+    int percentage = server.arg("v").toInt();
+    if (percentage > 100) percentage = 100;
+    if (percentage < -100) percentage = -100;
+    targetSpeed = map(percentage, -100, 100, -255, 255);
+    server.send(200, "text/plain", "OK");
+  }
+}
+ 
+void handleLed() {
+  if (server.hasArg("state")) {
+    int state = server.arg("state").toInt();
+    digitalWrite(LED1_PIN, state);
+    digitalWrite(LED2_PIN, state);
+    server.send(200, "text/plain", "OK");
+  }
+}
+ 
+// ==========================================
+// MOTOR CONTROL - OPRAVENO PRO NOVÉ ESP32
+// ==========================================
+void applyMotorSpeed(int speedPwm) {
+  int pwm = abs(speedPwm);
+ 
+  if (speedPwm > 0) {
+    ledcWrite(MOTOR_A1, pwm);
+    ledcWrite(MOTOR_A2, 0);
+    ledcWrite(MOTOR_B1, pwm);
+    ledcWrite(MOTOR_B2, 0);
+  }
+  else if (speedPwm < 0) {
+    ledcWrite(MOTOR_A1, 0);
+    ledcWrite(MOTOR_A2, pwm);
+    ledcWrite(MOTOR_B1, 0);
+    ledcWrite(MOTOR_B2, pwm);
+  }
+  else {
+    ledcWrite(MOTOR_A1, 0);
+    ledcWrite(MOTOR_A2, 0);
+    ledcWrite(MOTOR_B1, 0);
+    ledcWrite(MOTOR_B2, 0);
+  }
+}
+ 
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+ 
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+ 
+  // NOVÝ ZPŮSOB PWM (ESP32 verze 3.0+)
+  // ledcAttach(pin, frekvence, rozlišení_v_bitech)
+  ledcAttach(MOTOR_A1, 1000, 8);
+  ledcAttach(MOTOR_A2, 1000, 8);
+  ledcAttach(MOTOR_B1, 1000, 8);
+  ledcAttach(MOTOR_B2, 1000, 8);
+ 
+  WiFi.softAP(jmenoWifi, hesloWifi);
+  Serial.println(WiFi.softAPIP());
+ 
+  server.on("/", handleRoot);
+  server.on("/speed", handleSpeed);
+  server.on("/led", handleLed);
+  server.begin();
+}
+ 
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  server.handleClient();
+ 
+  if (millis() - lastRampTime > 5) {
+    if (currentSpeed < targetSpeed) {
+      currentSpeed += 2;
+      if (currentSpeed > targetSpeed) currentSpeed = targetSpeed;
+    }
+    if (currentSpeed > targetSpeed) {
+      currentSpeed -= 2;
+      if (currentSpeed < targetSpeed) currentSpeed = targetSpeed;
+    }
+    applyMotorSpeed((int)currentSpeed);
+    lastRampTime = millis();
+  }
+}
